@@ -1,0 +1,52 @@
+plugins {
+    id "java"
+}
+
+repositories {
+    maven { url = 'https://repo.spring.io/libs-milestone' }
+}
+
+compileTestJava {
+    options.release = 10
+}
+
+test {
+    dependsOn(tasks.getByPath(":agent:shadowJar"))
+
+    // Creates a JVM per test because the agent can be installed only once,
+    // and we test different installations.
+    // This is not required in normal testing scenarios
+    forkEvery = 1
+    maxParallelForks = 1
+    jvmArgs += [
+            "-Xverify:all",
+            "-Xlog:redefine+class*=warning"
+    ]
+}
+
+configurations {
+    reactor_3_3_x {
+        extendsFrom(testRuntimeOnly, testImplementation)
+    }
+}
+
+task testReactor3_3_x(type: Test) {
+    group = 'verification'
+
+    testClassesDirs = sourceSets.test.output.classesDirs
+    classpath = sourceSets.test.output.classesDirs + configurations.reactor_3_3_x
+
+    include 'com/example/ReactorTest**'
+}
+check.dependsOn(testReactor3_3_x)
+
+dependencies {
+    testImplementation project(":agent")
+    testImplementation 'io.projectreactor:reactor-core:3.2.5.RELEASE'
+    testImplementation 'io.reactivex.rxjava2:rxjava:2.2.18'
+
+    testImplementation 'junit:junit:4.13.2'
+    testImplementation 'org.assertj:assertj-core:3.27.7'
+
+    reactor_3_3_x 'io.projectreactor:reactor-core:3.2.5.RELEASE'
+}

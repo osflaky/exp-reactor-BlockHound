@@ -1,0 +1,232 @@
+plugins {
+    id 'com.gradleup.shadow' version '9.6.1'
+    id "java"
+    id "maven-publish"
+    id "signing"
+    id 'me.champeau.gradle.japicmp' version '0.4.6' apply false
+    id 'de.undercouch.download' version '5.7.0' apply false
+}
+
+import me.champeau.gradle.japicmp.JapicmpTask
+apply plugin: 'me.champeau.gradle.japicmp'
+apply plugin: 'de.undercouch.download'
+
+description = "BlockHound Java Agent"
+ext.detailedDescription = "Java agent to detect blocking calls from non-blocking threads."
+
+sourceSets {
+    jarFileTest
+}
+
+configurations {
+    jarFileTestImplementation.extendsFrom(testImplementation)
+    jarFileTestRuntimeOnly.extendsFrom(testRuntimeOnly)
+}
+
+task jarFileTest(type: Test) {
+    testClassesDirs = sourceSets.jarFileTest.output.classesDirs
+    classpath = sourceSets.jarFileTest.runtimeClasspath
+}
+
+java {
+    sourceCompatibility = JavaVersion.VERSION_1_8
+    targetCompatibility = JavaVersion.VERSION_1_8
+}
+
+compileJava {
+    options.release = 8
+}
+
+jar {
+    archiveClassifier.set('original')
+}
+
+shadowJar {
+    archiveClassifier.set('')
+
+    from("${rootDir}/docs/src/docs/dist") {
+        include "LICENSE"
+        into "META-INF"
+    }
+
+    manifest {
+        attributes('Can-Retransform-Classes': 'true')
+        attributes('Can-Set-Native-Method-Prefix': 'true')
+        attributes('Can-Redefine-Classes': 'true')
+        attributes('Automatic-Module-Name': 'reactor.blockhound')
+        attributes('Premain-Class': 'reactor.blockhound.BlockHound')
+    }
+
+    addMultiReleaseAttribute = false
+
+    exclude 'META-INF/versions/**'
+    exclude 'META-INF/NOTICE'
+	exclude 'META-INF/LICENSE'
+    exclude 'META-INF/licenses/'
+    exclude 'META-INF/maven/**'
+    exclude 'reactor/shaded/META-INF/**'
+
+    // TODO discuss with ByteBuddy folks how to shade it
+    exclude 'win32-x86*/**'
+
+    enableAutoRelocation = true
+    relocationPrefix = "reactor.blockhound.shaded"
+}
+
+project.tasks.build.dependsOn(shadowJar)
+
+configurations {
+    apiElements {
+        outgoing {
+            artifacts.clear()
+            artifact(shadowJar)
+        }
+    }
+    runtimeElements {
+        outgoing {
+            artifacts.clear()
+            artifact(shadowJar)
+        }
+    }
+}
+
+jarFileTest {
+    systemProperty("jarFile", shadowJar.outputs.files.singleFile)
+    dependsOn(shadowJar)
+}
+tasks.check.dependsOn tasks.jarFileTest
+
+dependencies {
+    compileOnly 'com.google.auto.service:auto-service-annotations:1.1.1'
+    annotationProcessor 'com.google.auto.service:auto-service:1.1.1'
+
+    implementation 'net.bytebuddy:byte-buddy:1.18.11'    
+    implementation 'net.bytebuddy:byte-buddy-agent:1.18.11'
+
+    compileOnly 'io.projectreactor:reactor-core:3.2.5.RELEASE'
+    compileOnly 'io.reactivex.rxjava2:rxjava:2.2.18'
+
+    jarFileTestImplementation 'org.assertj:assertj-core:3.27.7'
+    jarFileTestImplementation 'junit:junit:4.13.2'
+}
+
+task sourcesJar(type: Jar) {
+    archiveClassifier.set('sources')
+    from sourceSets.main.allJava
+    from("${rootDir}/docs/src/docs/dist") {
+        include "LICENSE"
+        into "META-INF"
+    }
+}
+
+task javadocJar(type: Jar) {
+    from javadoc
+    archiveClassifier.set('javadoc')
+    from("${rootDir}/docs/src/docs/dist") {
+        include "LICENSE"
+        into "META-INF"
+    }
+}
+
+jar {
+    from("${rootDir}/docs/src/docs/dist") {
+        include "LICENSE"
+        into "META-INF"
+    }
+}
+
+publishing {
+    publications {
+        mavenJava(MavenPublication) { publication ->
+            artifacts.removeAll { it.classifier == null }
+            artifact project.tasks.shadowJar
+            artifact sourcesJar
+            artifact javadocJar
+
+            artifactId = 'blockhound'
+        }
+    }
+}
+
+task downloadBaseline(type: Download) {
+	onlyIf {
+		if (project.gradle.startParameter.isOffline()) {
+			println "Offline: skipping downloading of baseline and JAPICMP"
+			return false
+		}
+		else if ("$compatibleVersion" == "SKIP") {
+			println "SKIP: Instructed to skip the baseline comparison"
+			return false
+		}
+		else {
+			println "Will download and perform baseline comparison with ${compatibleVersion}"
+			return true
+		}
+	}
+
+	onlyIfNewer true
+	compress true
+	src "${repositories.mavenCentral().url}io/projectreactor/tools/blockhound/$compatibleVersion/blockhound-${compatibleVersion}.jar"
+	dest layout.buildDirectory.file("baselineLibs/blockhound-${compatibleVersion}.jar").get().asFile
+}
+
+def japicmpReport = tasks.register('japicmpReport') {
+	onlyIf {
+		japicmp.state.failure != null
+	}
+	doLast {
+		def reportFile = layout.buildDirectory.file("reports/japi.txt").get().asFile
+		if (reportFile.exists()) {
+			println "\n **********************************"
+			println " * /!\\ API compatibility failures *"
+			println " **********************************"
+			println "Japicmp report was filtered and interpreted to find the following incompatibilities:"
+			reportFile.eachLine {
+				if (it.contains("*") && (!it.contains("***") || it.contains("****")))
+					println "source incompatible change: $it"
+				else if (it.contains("!"))
+					println "binary incompatible change: $it"
+			}
+		}
+		else println "No incompatible change to report"
+	}
+}
+
+task japicmp(type: JapicmpTask) {
+	finalizedBy(japicmpReport)
+	dependsOn(shadowJar)
+	onlyIf { "$compatibleVersion" != "SKIP" }
+
+	oldClasspath.from(files(layout.buildDirectory.file("baselineLibs/blockhound-${compatibleVersion}.jar").get().asFile))
+	newClasspath.from(files(jar.archiveFile))
+	// these onlyXxx parameters result in a report that is slightly too noisy, but better than
+	// onlyBinaryIncompatibleModified = true which masks source-incompatible-only changes
+	onlyBinaryIncompatibleModified = false
+	onlyModified = true
+	failOnModification = true
+	failOnSourceIncompatibility = true
+	txtOutputFile = layout.buildDirectory.file("reports/japi.txt").get().asFile
+	ignoreMissingClasses = true
+	includeSynthetic = true
+
+	compatibilityChangeExcludes = [ "METHOD_NEW_DEFAULT" ]
+
+	packageExcludes = [
+			// Always ignore shaded packages
+			'reactor.blockhound.shaded.*'
+	]
+
+	classExcludes = [
+			// Ignores this transformer which is used internally
+			'reactor.blockhound.AllowancesByteBuddyTransformer$AllowedArgument$Factory',
+			// Ignores this transformer which is used internally
+			'reactor.blockhound.BlockingCallsByteBuddyTransformer$ModifiersArgument$Factory'
+	]
+
+	methodExcludes = [
+	]
+}
+
+tasks.japicmp.dependsOn(downloadBaseline)
+
+tasks.check.dependsOn(japicmp)

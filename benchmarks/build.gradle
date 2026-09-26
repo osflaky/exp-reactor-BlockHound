@@ -1,0 +1,33 @@
+plugins {
+    id "java"
+    id "me.champeau.jmh" version "0.7.3"
+}
+
+java {
+    sourceCompatibility = JavaVersion.VERSION_1_8
+    targetCompatibility = JavaVersion.VERSION_1_8
+}
+
+repositories {
+    maven { url = 'https://repo.spring.io/libs-milestone' }
+}
+
+jmh {
+    jmhVersion = '1.37'
+    duplicateClassesStrategy = DuplicatesStrategy.INCLUDE
+    failOnError = true
+
+    def outputType = "baseline" == project.findProperty("jmhTarget")  ? "jmhBaseline" : "jmh"
+    resultFormat = "text"
+    resultsFile = layout.buildDirectory.file("reports/${outputType}/result.text").get().asFile
+}
+
+dependencies {
+    switch (project.findProperty("jmhTarget")) {
+        case "baseline":
+            jmh "io.projectreactor.tools:blockhound:${compatibleVersion}"
+            break
+        default:
+            jmh project(":agent")
+    }
+}
